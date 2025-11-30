@@ -2,9 +2,15 @@ services:
   - type: web
     name: examhub-backend
     env: docker
-    region: oregon
+    region: oregon  # or singapore, frankfurt, etc.
     plan: free
     dockerfilePath: ./Dockerfile
+    dockerContext: .
     envVars:
       - key: GEMINI_API_KEY
         sync: false
+      - key: PORT
+        value: 10000
+      - key: ENVIRONMENT
+        value: production
+    healthCheckPath: /health
