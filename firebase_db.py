@@ -1,31 +1,61 @@
 """
-Firebase Firestore Database Initialization Module
+Firebase Database Initialization
 
-This module initializes the Firebase Admin SDK and provides a Firestore client
-for database operations throughout the application.
+Handles Firebase Admin SDK initialization for both local development
+and production (Render) environments.
 """
 
 import os
+import json
 import firebase_admin
 from firebase_admin import credentials, firestore
-from dotenv import load_dotenv
 
-# Load environment variables
-load_dotenv()
+def initialize_firebase():
+    """
+    Initialize Firebase Admin SDK. 
+    
+    Priority:
+    1.  FIREBASE_CREDENTIALS env var (JSON string) - for production
+    2. firebase-credentials.json file - for local development
+    """
+    
+    # Check if already initialized
+    if firebase_admin._apps:
+        print("✅ Firebase already initialized")
+        return firestore. client()
+    
+    try:
+        # Option 1: Environment variable with JSON string (Production - Render)
+        firebase_creds_str = os.getenv("FIREBASE_CREDENTIALS")
+        
+        if firebase_creds_str:
+            print("🔥 Initializing Firebase from FIREBASE_CREDENTIALS environment variable...")
+            # Parse the JSON string
+            firebase_creds_dict = json.loads(firebase_creds_str)
+            cred = credentials.Certificate(firebase_creds_dict)
+            firebase_admin.initialize_app(cred)
+            print("✅ Firebase initialized successfully (Production)")
+        
+        # Option 2: Local JSON file (Local development)
+        elif os.path.exists("firebase-credentials.json"):
+            print("🔥 Initializing Firebase from local firebase-credentials.json file...")
+            cred = credentials.Certificate("firebase-credentials.json")
+            firebase_admin.initialize_app(cred)
+            print("✅ Firebase initialized successfully (Local)")
+        
+        else:
+            print("❌ ERROR: No Firebase credentials found!")
+            print("   Set FIREBASE_CREDENTIALS env var or add firebase-credentials.json")
+            raise ValueError("Firebase credentials not configured")
+        
+        return firestore.client()
+        
+    except json.JSONDecodeError as e:
+        print(f"❌ ERROR: Invalid JSON in FIREBASE_CREDENTIALS: {e}")
+        raise
+    except Exception as e:
+        print(f"❌ ERROR: Firebase initialization failed: {e}")
+        raise
 
-# Get the path to service account key from environment
-service_account_path = os.getenv('GOOGLE_APPLICATION_CREDENTIALS', 'serviceAccountKey.json')
-
-# Initialize Firebase Admin SDK
-try:
-    cred = credentials.Certificate(service_account_path)
-    firebase_admin.initialize_app(cred)
-    print(f"✓ Firebase initialized successfully using {service_account_path}")
-except Exception as e:
-    print(f"✗ Firebase initialization failed: {e}")
-    raise
-
-# Initialize Firestore client
-db = firestore.client()
-
-print("✓ Firestore client ready")
+# Initialize and export the db client
+db = initialize_firebase()
