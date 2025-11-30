@@ -2,20 +2,24 @@
 ExamHub Backend - FastAPI Application
 
 Main application file containing all API endpoints for the ExamHub platform.  
-Handles AI-generated mock test creation, test retrieval, and related operations.
+Handles AI-generated mock test creation, test retrieval, and related operations. 
 
 Version 2.0 - Includes chunked generation with quality validation
+Optimized for Docker deployment on Render
 """
 
 import os
 from typing import List, Optional, Literal, Dict, Any
 from datetime import datetime
 import logging
+import json
 
 from fastapi import FastAPI, HTTPException, status
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 from firebase_admin import firestore
+import firebase_admin
+from firebase_admin import credentials
 
 try:
     from dotenv import load_dotenv  # requires python-dotenv package
@@ -31,8 +35,54 @@ from ai_utils import generate_mcq_batch, generate_mcq_batch_chunked
 load_dotenv()
 
 # Setup logging
-logger = logging.getLogger("main")
-logger.setLevel(logging.INFO)
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
+logger = logging. getLogger("main")
+
+# ==================================================
+# Initialize Firebase (Production & Local)
+# ==================================================
+
+def initialize_firebase():
+    """Initialize Firebase Admin SDK for production (Render) and local development"""
+    try:
+        # Check if already initialized
+        if firebase_admin._apps:
+            logger.info("✅ Firebase already initialized")
+            return True
+            
+        # For production (Render) - credentials as JSON string in env var
+        firebase_creds_str = os.getenv("FIREBASE_CREDENTIALS")
+        
+        if firebase_creds_str:
+            logger.info("🔥 Initializing Firebase from FIREBASE_CREDENTIALS env var...")
+            firebase_creds = json.loads(firebase_creds_str)
+            cred = credentials.Certificate(firebase_creds)
+            firebase_admin.initialize_app(cred)
+            logger.info("✅ Firebase initialized successfully (Production)")
+            return True
+            
+        # For local development - credentials from JSON file
+        elif os.path.exists("firebase-credentials.json"):
+            logger. info("🔥 Initializing Firebase from local JSON file...")
+            cred = credentials.Certificate("firebase-credentials.json")
+            firebase_admin.initialize_app(cred)
+            logger.info("✅ Firebase initialized successfully (Local)")
+            return True
+            
+        else:
+            logger.error("❌ Firebase credentials not found!")
+            logger.error("Set FIREBASE_CREDENTIALS env var or add firebase-credentials.json")
+            return False
+            
+    except Exception as e:
+        logger.error(f"❌ Firebase initialization error: {e}")
+        return False
+
+# Initialize Firebase on startup
+firebase_initialized = initialize_firebase()
 
 # ==================================================
 # FastAPI app setup
@@ -40,17 +90,61 @@ logger.setLevel(logging.INFO)
 app = FastAPI(
     title="ExamHub API",
     description="AI-driven mock test platform for Indian government exams",
-    version="2.0. 0",
+    version="2.0.0",
 )
 
-# Configure CORS (relax for dev; tighten in prod)
+# Configure CORS - Update with your frontend URLs
+ALLOWED_ORIGINS = [
+    "http://localhost:5173",          # Local Vite dev
+    "http://localhost:3000",          # Local React dev
+    "http://localhost:8000",          # Local backend
+    "https://examhub. vercel.app",     # Production frontend
+    "https://examhub-frontend.vercel.app",  # Alternative frontend URL
+]
+
+# Add environment variable for additional origins
+additional_origins = os.getenv("ALLOWED_ORIGINS", "")
+if additional_origins:
+    ALLOWED_ORIGINS.extend(additional_origins.split(","))
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # TODO: restrict in production
+    allow_origins=ALLOWED_ORIGINS if os.getenv("ENVIRONMENT") == "production" else ["*"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# ==================================================
+# Startup Event
+# ==================================================
+
+@app.on_event("startup")
+async def startup_event():
+    """Run checks on startup"""
+    logger.info("\n" + "=" * 60)
+    logger.info("🚀 ExamHub Backend Starting...")
+    logger.info("=" * 60)
+    
+    # Check Firebase
+    if firebase_initialized:
+        logger.info("✅ Firebase: Connected")
+    else:
+        logger.warning("⚠️ Firebase: Not Connected")
+    
+    # Check Gemini API Key
+    gemini_key = os.getenv("GEMINI_API_KEY")
+    if gemini_key:
+        logger. info(f"✅ Gemini API Key: Present ({gemini_key[:10]}... )")
+    else:
+        logger.warning("⚠️ Gemini API Key: Not Set")
+    
+    # Environment info
+    env = os.getenv("ENVIRONMENT", "development")
+    port = os.getenv("PORT", "10000")
+    logger.info(f"📍 Environment: {env}")
+    logger.info(f"🔌 Port: {port}")
+    logger.info("=" * 60 + "\n")
 
 # ==================================================
 # Pydantic Models
@@ -91,12 +185,12 @@ class TestOut(BaseModel):
 
 class GenerateMockTestRequest(BaseModel):
     """
-    Generic topic-wise generation (old endpoint: /api/generate-mock).  
+    Generic topic-wise generation (old endpoint: /api/generate-mock).   
     Keeps your earlier structure so Postman tests don't break.
     """
     exam_id: str = Field(..., description="Exam identifier (e.g., 'ssc_cgl')")
     exam_name: str = Field(..., description="Full exam name (e.g., 'SSC Combined Graduate Level')")
-    subject: str = Field(... , description="Subject area (e.g., 'Quantitative Aptitude')")
+    subject: str = Field(..., description="Subject area (e.g., 'Quantitative Aptitude')")
     topic: str = Field(..., description="Specific topic (e.g., 'Algebra')")
     difficulty: Literal["easy", "moderate", "hard"] = Field(..., description="Difficulty level")
     num_questions: int = Field(..., ge=1, le=100, description="Number of questions (1-100)")
@@ -115,8 +209,11 @@ class HealthResponse(BaseModel):
     """Health check response"""
     status: str
     message: str
+    firebase: str
+    gemini: str
     ai_provider: str = "gemini"
     timestamp: str
+    environment: str
 
 
 # ---------- New high-level request models ----------
@@ -136,10 +233,10 @@ class TopicWiseMockRequest(BaseModel):
 class SectionalMockRequest(BaseModel):
     """
     For /api/generate-sectional-mock
-    Subject-wise (Maths / Reasoning / English / GK/GS / CA / Computer) mock.  
+    Subject-wise (Maths / Reasoning / English / GK/GS / CA / Computer) mock.   
     """
     exam: str = "SSC Combined Graduate Level"
-    subject: str  # e.g. "Quantitative Aptitude", "English Language", etc.
+    subject: str  # e.g.  "Quantitative Aptitude", "English Language", etc.
     difficulty: str = "moderate"
     numQuestions: int = 25  # usually 25
 
@@ -182,7 +279,7 @@ def _compute_duration_for_subject(subject: str, num_questions: int) -> int:
     - English:                       12 min
     - GK/GS (incl. CA, Computer):    7  min
 
-    For other subjects: 1 min/question, capped at 25.  
+    For other subjects: 1 min/question, capped at 25.   
     """
     s = subject.strip(). lower()
 
@@ -212,21 +309,48 @@ def _compute_duration_for_subject(subject: str, num_questions: int) -> int:
 
 
 # ==================================================
-# Health check
+# Health check & Status endpoints
 # ==================================================
 
 
-@app.get("/", response_model=HealthResponse)
+@app. get("/", response_model=HealthResponse)
+@app.get("/health", response_model=HealthResponse)
 async def health_check():
     """
     Health check endpoint to verify API is running.
+    Used by Render for health checks.
     """
+    firebase_status = "connected" if firebase_initialized else "not connected"
+    gemini_status = "configured" if os.getenv("GEMINI_API_KEY") else "not configured"
+    
     return HealthResponse(
         status="healthy",
         message="ExamHub API is running",
+        firebase=firebase_status,
+        gemini=gemini_status,
         ai_provider="gemini",
         timestamp=datetime.utcnow().isoformat(),
+        environment=os.getenv("ENVIRONMENT", "development")
     )
+
+
+@app.get("/api/status")
+async def api_status():
+    """Detailed API status"""
+    return {
+        "api": "ExamHub Backend",
+        "version": "2.0.0",
+        "status": "operational",
+        "firebase": {
+            "initialized": firebase_initialized,
+            "connected": bool(firebase_admin._apps)
+        },
+        "gemini": {
+            "configured": bool(os.getenv("GEMINI_API_KEY"))
+        },
+        "environment": os.getenv("ENVIRONMENT", "development"),
+        "timestamp": datetime.utcnow().isoformat()
+    }
 
 
 # ==================================================
@@ -327,7 +451,7 @@ async def generate_mock(payload: GenerateMockTestRequest):
 async def generate_topic_wise_mock(payload: TopicWiseMockRequest):
     """
     Topic-wise mock for a single subject & topic.
-    Example: SSC CGL, Quantitative Aptitude, Algebra, 25 Q.  
+    Example: SSC CGL, Quantitative Aptitude, Algebra, 25 Q.   
     
     ⚠️ DEPRECATED: Use /api/v2/generate-topic-wise-mock for better reliability
     """
@@ -348,8 +472,8 @@ async def generate_topic_wise_mock(payload: TopicWiseMockRequest):
     }
 
     test_ref = db.collection("tests"). document()
-    test_ref. set(test_doc)
-    questions_collection = test_ref. collection("questions")
+    test_ref.set(test_doc)
+    questions_collection = test_ref.collection("questions")
 
     try:
         mcqs = generate_mcq_batch(
@@ -412,15 +536,15 @@ async def generate_topic_wise_mock(payload: TopicWiseMockRequest):
 @app.post("/api/generate-sectional-mock", response_model=Dict[str, Any])
 async def generate_sectional_mock(payload: SectionalMockRequest):
     """
-    Sectional mock: subject-wise test (e.g.  Maths 25 Q, Reasoning 25 Q).  
+    Sectional mock: subject-wise test (e.g.  Maths 25 Q, Reasoning 25 Q).   
     Uses a 'Mixed <Subject>' topic hint to get questions from the whole subject.
     
     ⚠️ DEPRECATED: Use /api/v2/generate-sectional-mock for better reliability
     """
-    difficulty = _normalize_difficulty(payload. difficulty)
+    difficulty = _normalize_difficulty(payload.difficulty)
 
     exam_id = "ssc_cgl"
-    subject = payload.subject. strip()
+    subject = payload.subject.strip()
     topic_hint = f"Mixed {subject} questions as per SSC CGL exam pattern"
 
     title = f"{subject} Sectional Test ({difficulty.title()})"
@@ -543,7 +667,7 @@ async def generate_full_mock(payload: FullMockRequest):
         ),
     ]
 
-    title = f"{payload. exam} Full Mock Test (100 Questions, {difficulty.title()})"
+    title = f"{payload.exam} Full Mock Test (100 Questions, {difficulty.title()})"
 
     test_doc = {
         "examId": exam_id,
@@ -758,7 +882,7 @@ async def generate_sectional_mock_v2(payload: SectionalMockRequest):
         "createdAt": _server_timestamp(),
     }
 
-    test_ref = db.collection("tests").document()
+    test_ref = db. collection("tests").document()
     test_ref.set(test_doc)
     questions_collection = test_ref.collection("questions")
 
@@ -769,13 +893,13 @@ async def generate_sectional_mock_v2(payload: SectionalMockRequest):
             subject=subject,
             topic=topic_hint,
             difficulty=difficulty,
-            num_questions=payload. numQuestions,
+            num_questions=payload.numQuestions,
             chunk_size=8,
         )
         
         # 🎯 Ensure exact count
-        if len(mcqs) > payload. numQuestions:
-            logger. info(f"Trimming: Got {len(mcqs)} questions, keeping exactly {payload.numQuestions}")
+        if len(mcqs) > payload.numQuestions:
+            logger.info(f"Trimming: Got {len(mcqs)} questions, keeping exactly {payload.numQuestions}")
             mcqs = mcqs[:payload.numQuestions]
             
     except Exception as e:
@@ -786,7 +910,7 @@ async def generate_sectional_mock_v2(payload: SectionalMockRequest):
         )
 
     if not mcqs:
-        test_ref. delete()
+        test_ref.delete()
         raise HTTPException(
             status_code=500,
             detail="AI did not return any valid questions for this sectional mock.",
@@ -811,13 +935,13 @@ async def generate_sectional_mock_v2(payload: SectionalMockRequest):
         }
         q_ref = questions_collection.document()
         q_ref.set(qdoc)
-        question_docs. append({"id": q_ref.id, **qdoc})
+        question_docs.append({"id": q_ref. id, **qdoc})
 
     test_ref.update({"numQuestions": len(question_docs)})
     questions_out = [QuestionOut(**q) for q in question_docs]
 
     test_out = TestOut(
-        id=test_ref.id,
+        id=test_ref. id,
         examId=exam_id,
         title=title,
         subject=subject,
@@ -830,7 +954,7 @@ async def generate_sectional_mock_v2(payload: SectionalMockRequest):
 
     return {
         "message": f"✨ Sectional mock test generated successfully (V2 - Improved Reliability). Generated {len(questions_out)} questions.",
-        "test": test_out.dict(),
+        "test": test_out. dict(),
         "provider": "gemini-chunked",
     }
 
@@ -958,13 +1082,13 @@ async def generate_full_mock_v2(payload: FullMockRequest):
         # If failure occurs, check if we have at least 80 questions
         if len(all_mcqs) >= 80:
             # Proceed with partial test
-            logger.warning(f"Partial test generated: {len(all_mcqs)} questions. Error: {e}")
+            logger.warning(f"Partial test generated: {len(all_mcqs)} questions.  Error: {e}")
             
             test_ref.update({"numQuestions": len(all_mcqs)})
             questions_out = [QuestionOut(**q) for q in all_mcqs]
             
             test_out = TestOut(
-                id=test_ref. id,
+                id=test_ref.id,
                 examId=exam_id,
                 title=title + " (Partial)",
                 subject="Full Paper",
@@ -979,7 +1103,7 @@ async def generate_full_mock_v2(payload: FullMockRequest):
             breakdown = ", ".join([f"{subj}: {count}" for subj, count in subject_wise_count.items()])
             
             return {
-                "message": f"⚠️ Full mock test generated with {len(all_mcqs)} questions (some batches failed).  Breakdown: {breakdown}. Error: {e}",
+                "message": f"⚠️ Full mock test generated with {len(all_mcqs)} questions (some batches failed).  Breakdown: {breakdown}.  Error: {e}",
                 "test": test_out.dict(),
                 "provider": "gemini-chunked",
             }
@@ -1020,7 +1144,7 @@ async def generate_full_mock_v2(payload: FullMockRequest):
     questions_out = [QuestionOut(**q) for q in all_mcqs]
 
     test_out = TestOut(
-        id=test_ref. id,
+        id=test_ref.id,
         examId=exam_id,
         title=title,
         subject="Full Paper",
@@ -1046,7 +1170,7 @@ async def generate_full_mock_v2(payload: FullMockRequest):
 # ==================================================
 
 
-@app. get("/api/tests/{test_id}", response_model=TestOut)
+@app.get("/api/tests/{test_id}", response_model=TestOut)
 async def get_test(test_id: str):
     """
     Retrieve a test by ID with all its questions.
@@ -1182,7 +1306,7 @@ async def list_tests(
 
 
 # ==================================================
-# Run with uvicorn
+# Run with uvicorn (for local development)
 # ==================================================
 
 if __name__ == "__main__":
@@ -1195,4 +1319,11 @@ if __name__ == "__main__":
     print("Features: Chunked generation + Quality validation")
     print("=" * 50 + "\n")
 
-    uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=True)
+    port = int(os.getenv("PORT", 8000))
+    uvicorn.run(
+        "main:app", 
+        host="0.0.0.0", 
+        port=port, 
+        reload=True,
+        log_level="info"
+    )

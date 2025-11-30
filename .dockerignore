@@ -1,12 +1,12 @@
 __pycache__
-*.pyc
+*. pyc
 *.pyo
-*.pyd
+*. pyd
 . Python
 env/
 venv/
 . venv/
-pip-log.txt
+pip-log. txt
 pip-delete-this-directory.txt
 .tox/
 .coverage
@@ -24,6 +24,10 @@ coverage.xml
 *. db
 *.sqlite
 . env
+.env.local
 .DS_Store
 *.md
 ! README.md
+node_modules/
+dist/
+build/
