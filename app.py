@@ -14,7 +14,8 @@ from datetime import datetime
 import logging
 import json
 
-from fastapi import FastAPI, HTTPException, status
+from fastapi import FastAPI, HTTPException, Response, status
+# from fastapi.responses import Response
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 from firebase_admin import firestore
@@ -313,11 +314,11 @@ def _compute_duration_for_subject(subject: str, num_questions: int) -> int:
 # ==================================================
 
 
-@app. get("/", response_model=HealthResponse)
+@app.get("/", response_model=HealthResponse)
 @app.get("/health", response_model=HealthResponse)
 async def health_check():
     """
-    Health check endpoint to verify API is running.
+    Health check endpoint to verify API is running. 
     Used by Render for health checks.
     """
     firebase_status = "connected" if firebase_initialized else "not connected"
@@ -332,6 +333,20 @@ async def health_check():
         timestamp=datetime.utcnow().isoformat(),
         environment=os.getenv("ENVIRONMENT", "development")
     )
+
+
+# ✨ ADD THIS: Support HEAD requests for UptimeRobot
+@app.head("/health")
+@app.head("/")
+async def health_check_head():
+    """
+    HEAD request for health checks (used by monitoring services like UptimeRobot). 
+    Returns 200 status without body.
+    """
+    return Response(status_code=200, headers={
+        "Content-Type": "application/json",
+        "X-Health-Status": "healthy"
+    })
 
 
 @app.get("/api/status")
