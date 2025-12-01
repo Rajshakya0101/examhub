@@ -184,6 +184,39 @@ class TestOut(BaseModel):
     questions: List[QuestionOut]
 
 
+
+# ==================================================
+# Quiz-specific Models (for multi-exam quizzes)
+# ==================================================
+
+class GenerateQuizRequest(BaseModel):
+    """
+    Request model for generating subject-specific quizzes.
+    These quizzes are designed for all competitive exams (SSC, Banking, UPSC, etc.)
+    """
+    subject: Literal[
+        "Current Affairs",
+        "Mathematics", 
+        "General Knowledge",
+        "English",
+        "Reasoning",
+        "Hindi",
+        "Computer Knowledge"
+    ] = Field(... , description="Quiz subject")
+    
+    difficulty: Literal["easy", "moderate", "hard"] = Field(
+        default="moderate",
+        description="Difficulty level"
+    )
+    
+    numQuestions: int = Field(
+        default=15,
+        ge=5,
+        le=15,
+        description="Number of questions (5-15, default: 15)"
+    )
+
+
 class GenerateMockTestRequest(BaseModel):
     """
     Generic topic-wise generation (old endpoint: /api/generate-mock).   
@@ -766,6 +799,194 @@ async def generate_full_mock(payload: FullMockRequest):
 # ==================================================
 # ✨ NEW V2 ENDPOINTS (IMPROVED RELIABILITY) ✨
 # ==================================================
+
+
+# ==================================================
+# ✨ QUIZ GENERATOR (Multi-Exam Support)
+# ==================================================
+
+
+@app.post("/api/v2/generate-quiz", response_model=Dict[str, Any])
+async def generate_quiz_v2(payload: GenerateQuizRequest):
+    """
+    ✨ Generate quick quizzes for competitive exam preparation.
+    
+    Supports 7 subjects:
+    - Current Affairs: Recent events and developments
+    - Mathematics: Numerical and mathematical skills
+    - General Knowledge: GK and current affairs
+    - English: Language and comprehension
+    - Reasoning: Logical thinking abilities
+    - Hindi: Hindi language proficiency
+    - Computer Knowledge: Computer and IT knowledge
+    
+    Features:
+    - Max 15 questions per quiz
+    - Max 15 minutes duration
+    - Works across all competitive exams (SSC, Banking, UPSC, Railway, etc.)
+    - Chunked generation for reliability
+    - Quality validation
+    
+    Perfect for:
+    - Quick practice sessions
+    - Subject-specific preparation
+    - Daily warm-up exercises
+    """
+    difficulty = _normalize_difficulty(payload.difficulty)
+    subject = payload.subject
+    num_questions = min(payload.numQuestions, 15)  # Max 15 questions
+    
+    # Map subject to exam context and topic hints
+    subject_config = {
+        "Current Affairs": {
+            "exam_context": "General Competitive Exams (SSC, Banking, UPSC, Railway, UPSSSC PET, UPSSSC Junior Assistant, UPSSSC VDO, UPSI, UP Constable)",
+            "topic_hint": "Recent current affairs, important national and international events, government schemes, awards, sports, and significant developments from the last 6 months",
+            "duration_per_q": 0.8,  # 48 seconds per question
+        },
+        "Mathematics": {
+            "exam_context": "General Competitive Exams (SSC, Banking, UPSC, Railway, UPSSSC PET, UPSSSC Junior Assistant, UPSSSC VDO, UPSI, UP Constable)",
+            "topic_hint": "Mixed mathematics questions covering arithmetic, algebra, geometry, mensuration, data interpretation, and number systems suitable for competitive exams",
+            "duration_per_q": 1.0,  # 60 seconds per question
+        },
+        "General Knowledge": {
+            "exam_context": "General Competitive Exams (SSC, Banking, UPSC, Railway, UPSSSC PET, UPSSSC Junior Assistant, UPSSSC VDO, UPSI, UP Constable)",
+            "topic_hint": "General knowledge covering Indian history, geography, polity, economy, science, important personalities, books and authors, and static GK",
+            "duration_per_q": 0.7,  # 42 seconds per question
+        },
+        "English": {
+            "exam_context": "General Competitive Exams (SSC, Banking, UPSC, Railway)",
+            "topic_hint": "English language questions covering grammar, vocabulary, synonyms-antonyms, idioms-phrases, sentence correction, comprehension, and error spotting",
+            "duration_per_q": 0.8,  # 48 seconds per question
+        },
+        "Reasoning": {
+            "exam_context": "General Competitive Exams (SSC, Banking, UPSC, Railway, UPSSSC PET, UPSSSC Junior Assistant, UPSSSC VDO, UPSI, UP Constable)",
+            "topic_hint": "Logical and analytical reasoning covering verbal reasoning, non-verbal reasoning, puzzles, seating arrangements, blood relations, coding-decoding, and series",
+            "duration_per_q": 0.9,  # 54 seconds per question
+        },
+        "Hindi": {
+            "exam_context": "General Competitive Exams (UPSSSC PET, UPSSSC Junior Assistant, UPSSSC VDO, UPSI, UP Constable)",
+            "topic_hint": "Hindi language questions covering व्याकरण (grammar), शब्दावली (vocabulary), पर्यायवाची-विलोम (synonyms-antonyms), मुहावरे-लोकोक्तियाँ (idioms-proverbs), and वाक्य शुद्धि (sentence correction)",
+            "duration_per_q": 0.8,  # 48 seconds per question
+        },
+        "Computer Knowledge": {
+            "exam_context": "General Competitive Exams (SSC, Banking, UPSC, Railway, UPSSSC PET, UPSSSC Junior Assistant, UPSSSC VDO, UPSI, UP Constable)",
+            "topic_hint": "Computer and IT knowledge covering basics of computers, MS Office, internet, networking, database, programming concepts, cyber security, and latest technology trends",
+            "duration_per_q": 0.7,  # 42 seconds per question
+        },
+    }
+    
+    config = subject_config.get(subject)
+    if not config:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Invalid subject.  Must be one of: {', '.join(subject_config.keys())}"
+        )
+    
+    # Calculate duration (max 15 minutes)
+    duration_minutes = min(int(num_questions * config["duration_per_q"]), 15)
+    
+    exam_id = "multi_exam_quiz"
+    title = f"{subject} Quiz ({difficulty. title()} | {num_questions} Questions)"
+    
+    test_doc = {
+        "examId": exam_id,
+        "title": title,
+        "subject": subject,
+        "difficulty": difficulty,
+        "numQuestions": num_questions,
+        "durationMinutes": duration_minutes,
+        "isAIGenerated": True,
+        "quizType": "subject_quiz",  # Mark as quiz
+        "createdAt": _server_timestamp(),
+    }
+    
+    test_ref = db.collection("tests"). document()
+    test_ref.set(test_doc)
+    questions_collection = test_ref.collection("questions")
+    
+    try:
+        logger.info(f"Generating {num_questions} {subject} quiz questions at {difficulty} level")
+        
+        # 🔥 Use chunked generation for reliability
+        mcqs = generate_mcq_batch_chunked(
+            exam_name=config["exam_context"],
+            subject=subject,
+            topic=config["topic_hint"],
+            difficulty=difficulty,
+            num_questions=num_questions,
+            chunk_size=8,  # Generate in small batches
+        )
+        
+        # 🎯 Ensure exact count
+        if len(mcqs) > num_questions:
+            logger.info(f"Trimming: Got {len(mcqs)} questions, keeping exactly {num_questions}")
+            mcqs = mcqs[:num_questions]
+        elif len(mcqs) < num_questions:
+            logger.warning(f"Only generated {len(mcqs)}/{num_questions} questions after validation")
+            # Update the test doc with actual count
+            test_ref.update({"numQuestions": len(mcqs)})
+        
+    except Exception as e:
+        test_ref.delete()
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to generate {subject} quiz: {e}",
+        )
+    
+    if not mcqs:
+        test_ref.delete()
+        raise HTTPException(
+            status_code=500,
+            detail=f"AI did not return any valid questions for {subject} quiz.",
+        )
+    
+    # Store questions in Firestore
+    question_docs: List[Dict[str, Any]] = []
+    for mcq in mcqs:
+        qdoc = {
+            "examId": exam_id,
+            "subject": subject,
+            "topic": config["topic_hint"][:100],  # Truncate for storage
+            "difficulty": difficulty,
+            "questionText": mcq["questionText"],
+            "optionA": mcq["optionA"],
+            "optionB": mcq["optionB"],
+            "optionC": mcq["optionC"],
+            "optionD": mcq["optionD"],
+            "correctOption": mcq["correctOption"],
+            "explanation": mcq["explanation"],
+            "shortcut": mcq["shortcut"],
+            "timeToSolveSeconds": mcq["timeToSolveSeconds"],
+        }
+        q_ref = questions_collection. document()
+        q_ref.set(qdoc)
+        question_docs.append({"id": q_ref.id, **qdoc})
+    
+    # Final count update
+    final_count = len(question_docs)
+    test_ref.update({"numQuestions": final_count})
+    
+    questions_out = [QuestionOut(**q) for q in question_docs]
+    
+    test_out = TestOut(
+        id=test_ref.id,
+        examId=exam_id,
+        title=title,
+        subject=subject,
+        difficulty=difficulty,
+        numQuestions=final_count,
+        durationMinutes=duration_minutes,
+        isAIGenerated=True,
+        questions=questions_out,
+    )
+    
+    return {
+        "message": f"✨ {subject} quiz generated successfully!  {final_count} questions ready for practice.",
+        "test": test_out. dict(),
+        "provider": "gemini-chunked",
+        "quizType": "subject_quiz",
+    }
+
 
 
 @app.post("/api/v2/generate-topic-wise-mock", response_model=Dict[str, Any])
